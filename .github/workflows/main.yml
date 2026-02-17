@@ -1,16 +1,16 @@
-name: Windows RDP
+name: Windows RDP via Playit
 
 on:
   workflow_dispatch:
     inputs:
       rdp_password:
-        description: 'Password (mayusculas + minusculas + numero + simbolo)'
+        description: 'Password RDP (mayusculas + minusculas + numero + simbolo)'
         required: true
-        default: 'P@ssw0rd123!'
+        default: 'Admin@2024!'
       session_duration:
         description: 'Duracion en minutos (max 360)'
         required: false
-        default: '360'
+        default: '60'
 
 jobs:
   rdp:
@@ -35,65 +35,22 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
           Write-Host "Usuario rdpuser creado"
 
-      - name: Install OpenSSH and start tunnel via localhost.run
+      - name: Install and Start Playit
         shell: powershell
         run: |
-          # Instalar OpenSSH cliente si no esta
-          Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction SilentlyContinue
-          
-          # Crear carpeta .ssh y deshabilitar verificacion de host
-          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.ssh"
-          $sshConfig = "Host localhost.run`n  StrictHostKeyChecking no`n  UserKnownHostsFile /dev/null`n"
-          Set-Content -Path "$env:USERPROFILE\.ssh\config" -Value $sshConfig
-          
-          # Iniciar tunel SSH en segundo plano y guardar output
-          $logFile = "C:\tunnel.log"
-          Start-Process -FilePath "ssh" `
-            -ArgumentList "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -R 3389:localhost:3389 nokey@localhost.run" `
-            -RedirectStandardOutput $logFile `
-            -RedirectStandardError "C:\tunnel_err.log" `
-            -NoNewWindow
-          
-          Write-Host "Esperando que el tunel se establezca..."
-          Start-Sleep -Seconds 15
-          
-          # Leer la URL del log
-          $maxRetries = 20
-          $retryCount = 0
-          $tunnelUrl = $null
-          
-          while ($retryCount -lt $maxRetries) {
-            if (Test-Path $logFile) {
-              $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-              if ($content -match "([a-z0-9\-]+\.lhr\.life)") {
-                $tunnelUrl = $matches[1]
-                break
-              }
-            }
-            Start-Sleep -Seconds 3
-            $retryCount++
-          }
-          
-          if ($tunnelUrl) {
-            Write-Host "=========================================="
-            Write-Host "  CONEXION RDP LISTA"
-            Write-Host "=========================================="
-            Write-Host "  Host:     $tunnelUrl"
-            Write-Host "  Puerto:   443"
-            Write-Host "  Usuario:  rdpuser"
-            Write-Host "  Password: ${{ github.event.inputs.rdp_password }}"
-            Write-Host ""
-            Write-Host "  En mstsc poner:"
-            Write-Host "  ${tunnelUrl}:443"
-            Write-Host "=========================================="
+          Invoke-WebRequest -Uri "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-windows-x86_64-signed.exe" -OutFile "C:\playit.exe"
+          Write-Host "Playit descargado"
+
+          $secret = "${{ secrets.PLAYIT_SECRET }}"
+          if ($secret -ne "") {
+            Start-Process -FilePath "C:\playit.exe" -ArgumentList "--secret $secret" -NoNewWindow
           } else {
-            Write-Host "--- LOG TUNEL ---"
-            Get-Content "C:\tunnel.log" -ErrorAction SilentlyContinue
-            Write-Host "--- LOG ERROR ---"
-            Get-Content "C:\tunnel_err.log" -ErrorAction SilentlyContinue
-            Write-Host "ERROR: No se pudo obtener la URL del tunel"
-            exit 1
+            Start-Process -FilePath "C:\playit.exe" -NoNewWindow
           }
+
+          Write-Host "Playit iniciado - revisa tu panel en https://playit.gg para ver la IP y puerto"
+          Write-Host "Usuario:  rdpuser"
+          Write-Host "Password: ${{ github.event.inputs.rdp_password }}"
 
       - name: Keep Session Alive
         shell: powershell
@@ -101,7 +58,9 @@ jobs:
           $duration = [int]"${{ github.event.inputs.session_duration }}"
           $maxDuration = [Math]::Min($duration, 360)
           $seconds = $maxDuration * 60
-          Write-Host "Sesion activa por $maxDuration minutos..."
+
+          Write-Host "Sesion activa por $maxDuration minutos"
+
           $elapsed = 0
           while ($elapsed -lt $seconds) {
             Start-Sleep -Seconds 60
@@ -109,3 +68,5 @@ jobs:
             $remaining = ($seconds - $elapsed) / 60
             Write-Host "Tiempo restante: $remaining minutos"
           }
+
+          Write-Host "Sesion terminada"
