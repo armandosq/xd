@@ -1,0 +1,132 @@
+name: Windows RDP via Ngrok
+
+on:
+  workflow_dispatch:
+    inputs:
+      rdp_password:
+        description: 'Contraseña para el usuario RDP'
+        required: true
+        default: 'P@ssw0rd123!'
+      session_duration:
+        description: 'Duración máxima en minutos (max 360)'
+        required: false
+        default: '60'
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      # 1. Habilitar RDP en el runner de Windows
+      - name: Enable RDP
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          Write-Host "✅ RDP habilitado correctamente"
+
+      # 2. Crear usuario con contraseña personalizada
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          $password = ConvertTo-SecureString "${{ github.event.inputs.rdp_password }}" -AsPlainText -Force
+          New-LocalUser -Name "rdpuser" -Password $password -FullName "RDP User" -Description "Usuario para sesion RDP" -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
+          Write-Host "✅ Usuario 'rdpuser' creado y agregado a Administradores"
+
+      # 3. Instalar ngrok
+      - name: Install Ngrok
+        shell: powershell
+        run: |
+          # Descargar ngrok
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "C:\ngrok"
+          $env:PATH += ";C:\ngrok"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [System.EnvironmentVariableTarget]::Machine)
+          Write-Host "✅ Ngrok instalado en C:\ngrok"
+
+      # 4. Autenticar ngrok con tu token
+      - name: Authenticate Ngrok
+        shell: powershell
+        run: |
+          C:\ngrok\ngrok.exe config add-authtoken ${{ secrets.NGROK_TOKEN }}
+          Write-Host "✅ Ngrok autenticado"
+
+      # 5. Iniciar ngrok y mostrar la URL de conexión
+      - name: Start Ngrok Tunnel & Show Connection Info
+        shell: powershell
+        run: |
+          # Iniciar ngrok en segundo plano
+          Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
+          
+          # Esperar a que ngrok inicie
+          Start-Sleep -Seconds 5
+          
+          # Obtener la URL del túnel via API local
+          $maxRetries = 10
+          $retryCount = 0
+          $tunnelInfo = $null
+          
+          while ($retryCount -lt $maxRetries) {
+            try {
+              $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction Stop
+              if ($tunnelInfo.tunnels.Count -gt 0) {
+                break
+              }
+            } catch {
+              Write-Host "Esperando que ngrok inicie... ($retryCount/$maxRetries)"
+            }
+            Start-Sleep -Seconds 3
+            $retryCount++
+          }
+          
+          if ($tunnelInfo -and $tunnelInfo.tunnels.Count -gt 0) {
+            $tunnel = $tunnelInfo.tunnels[0]
+            $publicAddr = $tunnel.public_url -replace "tcp://", ""
+            $parts = $publicAddr.Split(":")
+            $host = $parts[0]
+            $port = $parts[1]
+            
+            Write-Host ""
+            Write-Host "=========================================="
+            Write-Host "  ✅ CONEXIÓN RDP LISTA"
+            Write-Host "=========================================="
+            Write-Host "  🖥️  Host:     $host"
+            Write-Host "  🔌  Puerto:   $port"
+            Write-Host "  👤  Usuario:  rdpuser"
+            Write-Host "  🔑  Password: ${{ github.event.inputs.rdp_password }}"
+            Write-Host ""
+            Write-Host "  📋 En Windows (mstsc):"
+            Write-Host "     Equipo: $host`:$port"
+            Write-Host ""
+            Write-Host "  📋 En Mac/Linux (remmina):"
+            Write-Host "     rdp://$host`:$port"
+            Write-Host "=========================================="
+          } else {
+            Write-Host "❌ No se pudo obtener la URL de ngrok"
+            exit 1
+          }
+
+      # 6. Mantener la sesión activa
+      - name: Keep Session Alive
+        shell: powershell
+        run: |
+          $duration = [int]"${{ github.event.inputs.session_duration }}"
+          $maxDuration = [Math]::Min($duration, 360)
+          $seconds = $maxDuration * 60
+          
+          Write-Host "⏱️ Sesión activa por $maxDuration minutos..."
+          Write-Host "   Para terminar antes, cancela el workflow manualmente."
+          
+          $elapsed = 0
+          while ($elapsed -lt $seconds) {
+            Start-Sleep -Seconds 60
+            $elapsed += 60
+            $remaining = ($seconds - $elapsed) / 60
+            Write-Host "⏳ Tiempo restante: $remaining minutos"
+          }
+          
+          Write-Host "⏰ Tiempo de sesión agotado."
